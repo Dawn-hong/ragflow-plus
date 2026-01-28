@@ -8,7 +8,7 @@ mysql:
   name: 'rag_flow'
   user: 'root'
   password: 'infini_rag_flow'
-  host: '8.163.37.51'
+  host: 'localhost'
   port: 5455
   max_connections: 900
   stale_timeout: 300
@@ -16,11 +16,11 @@ mysql:
 minio:
   user: 'rag_flow'
   password: 'infini_rag_flow'
-  host: '8.163.37.51:9000'
+  host: 'localhost:9000'
   bucket: ''
   prefix_path: ''
 es:
-  hosts: 'http://8.163.37.51:1200'
+  hosts: 'http://localhost:1200'
   username: 'elastic'
   password: 'infini_rag_flow'
 os:
@@ -29,6 +29,7 @@ os:
   password: 'infini_rag_flow_OS_01'
 infinity:
   uri: 'localhost:23817'
+  postgres_port: 5432
   db_name: 'default_db'
 oceanbase:
   scheme: 'oceanbase' # set 'mysql' to create connection using mysql config
@@ -42,38 +43,14 @@ redis:
   db: 1
   username: ''
   password: 'infini_rag_flow'
-  host: '8.163.37.51:6379'
+  host: 'localhost:6379'
 task_executor:
   message_queue_type: 'redis'
 user_default_llm:
-  factory: 'Tongyi-Qianwen'
-  api_key: 'sk-d7c6d5a7774d48c994d519357c31ab92'
-  base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1'
   default_models:
-    chat_model:
-      name: 'qwen-plus'
-      api_key: 'sk-d7c6d5a7774d48c994d519357c31ab92'
-      base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1'
     embedding_model:
-      name: 'text-embedding-v3'
-      api_key: 'sk-d7c6d5a7774d48c994d519357c31ab92'
-      base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-# MinerU Configuration (supports both local CLI and online API modes)
-mineru:
-  # Online API mode settings
-  online_enabled: true
-  token: 'eyJ0eXBlIjoiSldUIiwiYWxnIjoiSFM1MTIifQ.eyJqdGkiOiI4MjMwMDQ4OSIsInJvbCI6IlJPTEVfUkVHSVNURVIiLCJpc3MiOiJPcGVuWExhYiIsImlhdCI6MTc2OTIyOTc0NiwiY2xpZW50SWQiOiJsa3pkeDU3bnZ5MjJqa3BxOXgydyIsInBob25lIjoiMTMxOTIzMjc0MjgiLCJvcGVuSWQiOm51bGwsInV1aWQiOiI1MmNkZjRlOC05MTZkLTQ0OTAtYTY5OC0zNzk5ZTBhZjQ3ZjMiLCJlbWFpbCI6IiIsImV4cCI6MTc3MDQzOTM0Nn0.rkJprHOD8Ww9w5_9qN-cs5NCg-Ws_pos1BbgC10Uin4iozHg-2jGIeJlgdCQD2hQPKhDCC6orqqIQEzSo29kig'
-  model_version: 'vlm'
-  poll_interval: 5
-  poll_timeout: 300
-  # Cloud storage settings (upload parsed images to MinIO)
-  upload_to_storage: true
-  storage_bucket: 'mineru-images'
-  presigned_url_expires_days: 7
-  # Local mode settings (optional)
-  # executable: 'mineru'
-  # output_dir: ''
-  # delete_output: true
+      api_key: 'xxx'
+      base_url: 'http://localhost:6380'
 # postgres:
 #   name: 'rag_flow'
 #   user: 'rag_flow'
@@ -91,9 +68,11 @@ mineru:
 # oss:
 #   access_key: 'access_key'
 #   secret_key: 'secret_key'
-#   endpoint_url: 'http://oss-cn-hangzhou.aliyuncs.com'
+#   endpoint_url: 'https://s3.oss-cn-hangzhou.aliyuncs.com'
 #   region: 'cn-hangzhou'
 #   bucket: 'bucket_name'
+#   signature_version: 's3'
+#   addressing_style: 'virtual'
 # azure:
 #   auth_type: 'sas'
 #   container_url: 'container_url'
