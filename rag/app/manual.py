@@ -17,6 +17,7 @@
 import logging
 import copy
 import re
+import os
 
 from common.constants import ParserType
 from io import BytesIO
@@ -185,7 +186,35 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
     # is it English
     eng = lang.lower() == "english"  # pdf_parser.is_english
     if re.search(r"\.pdf$", filename, re.IGNORECASE):
-        layout_recognizer, parser_model_name = normalize_layout_recognizer(parser_config.get("layout_recognize", "DeepDOC"))
+        layout_recognizer = parser_config.get("layout_recognize")
+        if not layout_recognizer:
+            # Fallback logic: Check if MinerU is configured in service_conf.yaml environment
+            from common.constants import MINERU_DEFAULT_CONFIG, MINERU_ENV_KEYS
+            mineru_conf = MINERU_DEFAULT_CONFIG.copy()
+            import os
+            
+            # Check for MinerU token presence
+            if os.environ.get("MINERU_TOKEN"):
+                layout_recognizer = "MinerU"
+                logging.info("Auto-selected MinerU based on MINERU_TOKEN env var")
+            else:
+                # Try reading service_conf.yaml directly if env var is missing
+                try:
+                    from common.config_utils import get_base_config
+                    mineru_conf = get_base_config("mineru", {})
+                    token = mineru_conf.get("token")
+                    if token:
+                        layout_recognizer = "MinerU"
+                    else:
+                        layout_recognizer = "DeepDOC"
+                    logging.info(f"Auto-selection check: layout_recognizer={layout_recognizer} (token_in_env={bool(os.environ.get('MINERU_TOKEN'))}, token_in_conf={bool(token)})")
+                except Exception as e:
+                    logging.error(f"Failed to check service_conf for MinerU token: {e}")
+                    layout_recognizer = "DeepDOC"
+            # If user has explicitly enabled MinerU online mode, maybe they want it default?
+            # But let's stick to safe defaults. DeepDOC is default.
+
+        layout_recognizer, parser_model_name = normalize_layout_recognizer(layout_recognizer)
 
         if isinstance(layout_recognizer, bool):
             layout_recognizer = "DeepDOC" if layout_recognizer else "Plain Text"
@@ -210,6 +239,11 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
             parse_method="manual",
             **kwargs,
         )
+
+        if sections is None:
+            sections = []
+        if tbls is None:
+            tbls = []
 
         def _normalize_section(section):
             # pad section to length 3: (txt, sec_id, poss)

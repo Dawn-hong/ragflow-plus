@@ -72,8 +72,8 @@ mineru:
   presigned_url_expires_days: 7
   # Local mode settings (optional)
   # executable: 'mineru'
-  # output_dir: ''
-  # delete_output: true
+  output_dir: 'D:\Agent_Projcet\ragflow\mineru_download'
+  delete_output: false
 # postgres:
 #   name: 'rag_flow'
 #   user: 'rag_flow'

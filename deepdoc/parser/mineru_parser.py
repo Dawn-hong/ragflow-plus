@@ -35,6 +35,7 @@ from PIL import Image
 from strenum import StrEnum
 
 from deepdoc.parser.pdf_parser import RAGFlowPdfParser
+from deepdoc.parser.mineru_saas_client import MinerUSaaSClient
 
 LOCK_KEY_pdfplumber = "global_shared_lock_pdfplumber"
 if LOCK_KEY_pdfplumber not in sys.modules:
@@ -133,9 +134,11 @@ class MinerUParseOptions:
 
 
 class MinerUParser(RAGFlowPdfParser):
-    def __init__(self, mineru_path: str = "mineru", mineru_api: str = "", mineru_server_url: str = ""):
+    def __init__(self, mineru_path: str = "mineru", mineru_api: str = "", mineru_server_url: str = "", mineru_token: str = "", model_version: str = "vlm"):
         self.mineru_api = mineru_api.rstrip("/")
         self.mineru_server_url = mineru_server_url.rstrip("/")
+        self.mineru_token = mineru_token
+        self.model_version = model_version
         self.outlines = []
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -201,6 +204,10 @@ class MinerUParser(RAGFlowPdfParser):
             return False
 
     def check_installation(self, backend: str = "pipeline", server_url: Optional[str] = None) -> tuple[bool, str]:
+        # If token is provided, we assume SaaS mode and skip local/self-hosted checks
+        if self.mineru_token:
+             return True, ""
+
         reason = ""
 
         valid_backends = ["pipeline", "vlm-http-client", "vlm-transformers", "vlm-vllm-engine", "vlm-mlx-engine", "vlm-vllm-async-engine", "vlm-lmdeploy-engine"]
@@ -248,6 +255,9 @@ class MinerUParser(RAGFlowPdfParser):
     def _run_mineru_api(
         self, input_path: Path, output_dir: Path, options: MinerUParseOptions, callback: Optional[Callable] = None
     ) -> Path:
+        if self.mineru_token:
+            return self._run_mineru_saas(input_path, output_dir, options, callback)
+
         pdf_file_path = str(input_path)
 
         if not os.path.exists(pdf_file_path):
@@ -322,6 +332,104 @@ class MinerUParser(RAGFlowPdfParser):
         self.logger.info("[MinerU] Api completed successfully.")
         return Path(output_path)
 
+    def _run_mineru_saas(
+        self, input_path: Path, output_dir: Path, options: MinerUParseOptions, callback: Optional[Callable] = None
+    ) -> Path:
+        pdf_file_path = str(input_path)
+        if not os.path.exists(pdf_file_path):
+            raise RuntimeError(f"[MinerU SaaS] PDF file not exists: {pdf_file_path}")
+
+        pdf_file_name = Path(pdf_file_path).stem.strip()
+        
+        self.logger.info(f"[MinerU SaaS] Starting SaaS processing for {pdf_file_path}")
+        if callback:
+            callback(0.20, f"[MinerU SaaS] Starting upload...")
+
+        try:
+            client = MinerUSaaSClient(self.mineru_token, self.model_version)
+            batch_id = client.upload(pdf_file_path)
+            
+            if callback:
+                 callback(0.40, f"[MinerU SaaS] Uploaded. Batch ID: {batch_id}. Waiting for result...")
+            
+            # Use batch_id to create a stable, reusable output directory
+            # Sanitize filename for path safety
+            safe_name = "".join([c for c in pdf_file_name if c.isalnum() or c in (' ', '.', '-', '_')]).strip()
+            final_output_path = output_dir / f"{safe_name}_{batch_id}"
+            marker_file = final_output_path / "_completed"
+            lock_file = final_output_path / "_lock"
+
+            # Always verify status with server first, as requested
+            self.logger.info(f"[MinerU SaaS] Polling for results (batch_id={batch_id})...")
+            download_url = client.poll_until_done(batch_id)
+            self.logger.info(f"[MinerU SaaS] Download URL obtained: {download_url}")
+
+            # Check if already processed LOCALLY after server confirms it's DONE
+            if final_output_path.exists() and marker_file.exists():
+                self.logger.info(f"[MinerU SaaS] Found cached result in {final_output_path}, reusing.")
+                if callback:
+                    callback(0.90, f"[MinerU SaaS] Using cached result.")
+                return final_output_path
+
+            # Ensure directory exists
+            os.makedirs(final_output_path, exist_ok=True)
+
+            # Simple file lock mechanism to prevent race conditions among parallel workers
+            import time
+            lock_acquired = False
+            try:
+                # Try to acquire lock
+                start_lock_wait = time.time()
+                while time.time() - start_lock_wait < 600: # Wait up to 10 mins for other task to finish download
+                    try:
+                        # Open for exclusive creation
+                        fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        os.close(fd)
+                        lock_acquired = True
+                        break
+                    except FileExistsError:
+                        # Check recursively if done while waiting
+                        if marker_file.exists():
+                            self.logger.info(f"[MinerU SaaS] Another task completed download in {final_output_path}, reusing.")
+                            return final_output_path
+                        time.sleep(1)
+                
+                if not lock_acquired:
+                    self.logger.warning(f"[MinerU SaaS] Could not acquire lock for {final_output_path}, proceeding potentially unsafe.")
+
+                # Proceed with download (Critical Section)
+                if callback:
+                    callback(0.80, f"[MinerU SaaS] Downloading result...")
+
+                output_zip_path = final_output_path / f"output.zip"
+
+                # Download ZIP
+                with requests.get(download_url, stream=True) as r:
+                    r.raise_for_status()
+                    with open(output_zip_path, 'wb') as f:
+                        shutil.copyfileobj(r.raw, f)
+
+                self.logger.info(f"[MinerU SaaS] Unzip to {final_output_path}...")
+                self._extract_zip_no_root(output_zip_path, final_output_path, pdf_file_name + "/")
+                
+                # Create marker file
+                with open(marker_file, 'w') as f:
+                    f.write("done")
+
+            finally:
+                if lock_acquired and lock_file.exists():
+                    try:
+                        os.remove(lock_file)
+                    except Exception:
+                        pass
+
+
+        except Exception as e:
+             self.logger.error(f"[MinerU SaaS] processing failed: {e}")
+             raise RuntimeError(f"[MinerU SaaS] processing failed: {e}")
+
+        return Path(final_output_path)
+
     def __images__(self, fnm, zoomin: int = 1, page_from=0, page_to=600, callback=None):
         self.page_from = page_from
         self.page_to = page_to
@@ -340,12 +448,14 @@ class MinerUParser(RAGFlowPdfParser):
         positions = bx.get("bbox", (0, 0, 0, 0))
         x0, top, x1, bott = positions
 
-        if hasattr(self, "page_images") and self.page_images and len(self.page_images) > bx["page_idx"]:
-            page_width, page_height = self.page_images[bx["page_idx"]].size
-            x0 = (x0 / 1000.0) * page_width
-            x1 = (x1 / 1000.0) * page_width
-            top = (top / 1000.0) * page_height
-            bott = (bott / 1000.0) * page_height
+        if hasattr(self, "page_images") and self.page_images:
+            idx = bx["page_idx"] - getattr(self, "page_from", 0)
+            if 0 <= idx < len(self.page_images):
+                page_width, page_height = self.page_images[idx].size
+                x0 = (x0 / 1000.0) * page_width
+                x1 = (x1 / 1000.0) * page_width
+                top = (top / 1000.0) * page_height
+                bott = (bott / 1000.0) * page_height
 
         return "@@{}\t{:.1f}\t{:.1f}\t{:.1f}\t{:.1f}##".format("-".join([str(p) for p in pn]), x0, x1, top, bott)
 
@@ -363,6 +473,7 @@ class MinerUParser(RAGFlowPdfParser):
                 return None, None
             return
 
+        page_from = getattr(self, "page_from", 0)
         page_count = len(self.page_images)
 
         filtered_poss = []
@@ -370,15 +481,22 @@ class MinerUParser(RAGFlowPdfParser):
             if not pns:
                 self.logger.warning("[MinerU] Empty page index list in crop; skipping this position.")
                 continue
-            valid_pns = [p for p in pns if 0 <= p < page_count]
-            if not valid_pns:
-                self.logger.warning(f"[MinerU] All page indices {pns} out of range for {page_count} pages; skipping.")
+            # Convert absolute page numbers to relative indices
+            rel_pns = [p - page_from for p in pns]
+            valid_rel_pns = [p for p in rel_pns if 0 <= p < page_count]
+            if not valid_rel_pns:
+                # self.logger.warning(f"[MinerU] All page indices {pns} (rel {rel_pns}) out of range for {page_count} images (offset {page_from}); skipping.")
                 continue
-            filtered_poss.append((valid_pns, left, right, top, bottom))
+            
+            # Use original pns for checking if they are contiguous? No, we just need valid relative indices to crop from images.
+            # But the logic uses pns to check continuity? 
+            # Logic below uses pns[0] etc.
+            # We strictly need to use relative indices for image access.
+            filtered_poss.append((valid_rel_pns, left, right, top, bottom))
 
         poss = filtered_poss
         if not poss:
-            self.logger.warning("[MinerU] No valid positions after filtering; skip cropping.")
+            # self.logger.warning("[MinerU] No valid positions after filtering; skip cropping.")
             if need_position:
                 return None, None
             return
@@ -386,6 +504,7 @@ class MinerUParser(RAGFlowPdfParser):
         max_width = max(np.max([right - left for (_, left, right, _, _) in poss]), 6)
         GAP = 6
         pos = poss[0]
+        # pos[0] is valid_rel_pns
         first_page_idx = pos[0][0]
         poss.insert(0, ([first_page_idx], pos[1], pos[2], max(0, pos[3] - 120), max(pos[3] - GAP, 0)))
         pos = poss[-1]
@@ -415,6 +534,7 @@ class MinerUParser(RAGFlowPdfParser):
                 bottom = top + 2
 
             for pn in pns[1:]:
+                # pn is relative
                 if 0 <= pn - 1 < page_count:
                     bottom += self.page_images[pn - 1].size[1]
                 else:
@@ -431,7 +551,7 @@ class MinerUParser(RAGFlowPdfParser):
             crop0 = img0.crop((x0, y0, x1, y1))
             imgs.append(crop0)
             if 0 < ii < len(poss) - 1:
-                positions.append((pns[0] + self.page_from, x0, x1, y0, y1))
+                positions.append((pns[0] + page_from, x0, x1, y0, y1))
 
             bottom -= img0.size[1]
             for pn in pns[1:]:
@@ -444,7 +564,7 @@ class MinerUParser(RAGFlowPdfParser):
                 cimgp = page.crop((x0, y0, x1, y1))
                 imgs.append(cimgp)
                 if 0 < ii < len(poss) - 1:
-                    positions.append((pn + self.page_from, x0, x1, y0, y1))
+                    positions.append((pn + page_from, x0, x1, y0, y1))
                 bottom -= page.size[1]
 
         if not imgs:
@@ -522,12 +642,38 @@ class MinerUParser(RAGFlowPdfParser):
                     json_file = nested_alt
 
         if not json_file:
-            raise FileNotFoundError(f"[MinerU] Missing output file, tried: {', '.join(str(p) for p in attempted)}")
+            self.logger.info(f"[MinerU] Specific file not found. Searching recursively in {output_dir}...")
+            found_files = []
+            for root, dirs, files in os.walk(output_dir):
+                for file in files:
+                    full_path = Path(root) / file
+                    found_files.append(str(full_path))
+                    if file.endswith("_content_list.json"):
+                        # Use the first one found if we haven't found one yet
+                        # We prefer the one that might match the stem, but if we are here, we failed to find exact matches.
+                        # So just taking the first valid content list is a reasonable fallback.
+                        if not json_file:
+                             json_file = full_path
+                             subdir = Path(root)
+                             self.logger.info(f"[MinerU] Found fallback JSON: {json_file}")
+            
+            self.logger.info(f"[MinerU] All files found in output: {found_files}")
+
+        if not json_file:
+            raise FileNotFoundError(f"[MinerU] Missing output file, tried: {', '.join(str(p) for p in attempted)}. All files found: {found_files}")
 
         with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         for item in data:
+            # Compatibility fix: ensure 'bbox' exists, map from 'layout_bbox' if needed
+            if "bbox" not in item and "layout_bbox" in item:
+                item["bbox"] = item["layout_bbox"]
+            
+            # Ensure page_idx is present (some older versions might use 'page_id'?)
+            if "page_idx" not in item and "page_id" in item:
+                item["page_idx"] = item["page_id"]
+
             for key in ("img_path", "table_img_path", "equation_img_path"):
                 if key in item and item[key]:
                     item[key] = str((subdir / item[key]).resolve())
@@ -623,11 +769,14 @@ class MinerUParser(RAGFlowPdfParser):
             out_dir = Path(tempfile.mkdtemp(prefix="mineru_pdf_"))
             created_tmp_dir = True
 
+        from_page = kwargs.get("from_page", 0)
+        to_page = kwargs.get("to_page", 100000)
+
         self.logger.info(f"[MinerU] Output directory: {out_dir} backend={backend} api={self.mineru_api} server_url={server_url or self.mineru_server_url}")
         if callback:
             callback(0.15, f"[MinerU] Output directory: {out_dir}")
 
-        self.__images__(pdf, zoomin=1)
+        self.__images__(pdf, zoomin=1, page_from=from_page, page_to=to_page)
 
         try:
             options = MinerUParseOptions(
@@ -642,11 +791,15 @@ class MinerUParser(RAGFlowPdfParser):
             )
             final_out_dir = self._run_mineru(pdf, out_dir, options, callback=callback)
             outputs = self._read_output(final_out_dir, pdf.stem, method=mineru_method_raw_str, backend=backend)
-            self.logger.info(f"[MinerU] Parsed {len(outputs)} blocks from PDF.")
+            
+            # Filter outputs based on page range
+            filtered_outputs = [o for o in outputs if from_page <= o.get("page_idx", 0) < to_page]
+            self.logger.info(f"[MinerU] Parsed {len(outputs)} blocks from PDF (filtered to {len(filtered_outputs)} in range {from_page}-{to_page}).")
+            
             if callback:
-                callback(0.75, f"[MinerU] Parsed {len(outputs)} blocks from PDF.")
+                callback(0.75, f"[MinerU] Parsed {len(filtered_outputs)} blocks from PDF.")
 
-            return self._transfer_to_sections(outputs, parse_method), self._transfer_to_tables(outputs)
+            return self._transfer_to_sections(filtered_outputs, parse_method), self._transfer_to_tables(filtered_outputs)
         finally:
             if temp_pdf and temp_pdf.exists():
                 try:

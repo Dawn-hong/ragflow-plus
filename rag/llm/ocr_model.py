@@ -30,6 +30,8 @@ class Base:
         raise NotImplementedError("Please implement parse_pdf!")
 
 
+from common import settings
+
 class MinerUOcrModel(Base, MinerUParser):
     _FACTORY_NAME = "MinerU"
 
@@ -48,15 +50,29 @@ class MinerUOcrModel(Base, MinerUParser):
         if not isinstance(config, dict):
             config = {}
 
-        def _resolve_config(key: str, env_key: str, default=""):
-            # lower-case keys (UI), upper-case MINERU_* (env auto-provision), env vars
-            return config.get(key, config.get(env_key, os.environ.get(env_key, default)))
+        def _resolve_config(key: str, env_key: str, default="", mineru_key: str = None):
+            # Priority: 
+            # 1. Direct config (UI/Key)
+            # 2. Key in Env (if auto-provisioned)
+            # 3. Env Var
+            # 4. Settings Global (settings.MINERU)
+            # 5. Default
+            val = config.get(key, config.get(env_key, os.environ.get(env_key)))
+            if val is not None:
+                return val
+            
+            if mineru_key and mineru_key in settings.MINERU:
+                return settings.MINERU[mineru_key]
+                
+            return default
 
         self.mineru_api = _resolve_config("mineru_apiserver", "MINERU_APISERVER", "")
-        self.mineru_output_dir = _resolve_config("mineru_output_dir", "MINERU_OUTPUT_DIR", "")
-        self.mineru_backend = _resolve_config("mineru_backend", "MINERU_BACKEND", "pipeline")
-        self.mineru_server_url = _resolve_config("mineru_server_url", "MINERU_SERVER_URL", "")
-        self.mineru_delete_output = bool(int(_resolve_config("mineru_delete_output", "MINERU_DELETE_OUTPUT", 1)))
+        self.mineru_output_dir = _resolve_config("mineru_output_dir", "MINERU_OUTPUT_DIR", "", "output_dir")
+        self.mineru_backend = _resolve_config("mineru_backend", "MINERU_BACKEND", "pipeline", "backend")
+        self.mineru_server_url = _resolve_config("mineru_server_url", "MINERU_SERVER_URL", "", "server_url")
+        self.mineru_delete_output = bool(int(_resolve_config("mineru_delete_output", "MINERU_DELETE_OUTPUT", 1, "delete_output")))
+        self.mineru_token = _resolve_config("token", "MINERU_TOKEN", "", "token")
+        self.mineru_model_version = _resolve_config("model_version", "MINERU_MODEL_VERSION", "vlm", "model_version")
 
         # Redact sensitive config keys before logging
         redacted_config = {}
@@ -67,7 +83,7 @@ class MinerUOcrModel(Base, MinerUParser):
                 redacted_config[k] = v
         logging.info(f"Parsed MinerU config (sensitive fields redacted): {redacted_config}")
 
-        MinerUParser.__init__(self, mineru_api=self.mineru_api, mineru_server_url=self.mineru_server_url)
+        MinerUParser.__init__(self, mineru_api=self.mineru_api, mineru_server_url=self.mineru_server_url, mineru_token=self.mineru_token, model_version=self.mineru_model_version)
 
     def check_available(self, backend: Optional[str] = None, server_url: Optional[str] = None) -> tuple[bool, str]:
         backend = backend or self.mineru_backend
@@ -75,6 +91,9 @@ class MinerUOcrModel(Base, MinerUParser):
         return self.check_installation(backend=backend, server_url=server_url)
 
     def parse_pdf(self, filepath: str, binary=None, callback=None, parse_method: str = "raw", **kwargs):
+        if not self.mineru_output_dir and settings.MINERU.get("output_dir"):
+            self.mineru_output_dir = settings.MINERU["output_dir"]
+        
         ok, reason = self.check_available()
         if not ok:
             raise RuntimeError(f"MinerU server not accessible: {reason}")

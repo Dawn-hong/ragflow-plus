@@ -226,13 +226,27 @@ class TenantLLMService(CommonService):
 
     @classmethod
     def _collect_mineru_env_config(cls) -> dict | None:
-        cfg = MINERU_DEFAULT_CONFIG
+        cfg = MINERU_DEFAULT_CONFIG.copy()
         found = False
         for key in MINERU_ENV_KEYS:
             val = os.environ.get(key)
             if val:
                 found = True
                 cfg[key] = val
+
+        if not found:
+            from common.config_utils import get_base_config
+            mineru_conf = get_base_config("mineru", {})
+            if mineru_conf:
+                # Map yaml keys (lower case) to env keys (upper case)
+                # yaml: token -> env: MINERU_TOKEN
+                # yaml: online_enabled -> env: MINERU_ONLINE_ENABLED (not in keys, but whatever)
+                for k, v in mineru_conf.items():
+                    env_key = f"MINERU_{k.upper()}"
+                    if env_key in MINERU_ENV_KEYS:
+                        cfg[env_key] = v
+                        found = True
+        
         return cfg if found else None
 
     @classmethod

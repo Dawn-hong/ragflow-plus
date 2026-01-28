@@ -115,6 +115,7 @@ OB = {}
 OSS = {}
 OS = {}
 GCS = {}
+MINERU = {}
 
 DOC_MAXIMUM_SIZE: int = 128 * 1024 * 1024
 DOC_BULK_SIZE: int = 4
@@ -344,6 +345,10 @@ def init_settings():
     DOC_MAXIMUM_SIZE = int(os.environ.get("MAX_CONTENT_LENGTH", 128 * 1024 * 1024))
     DOC_BULK_SIZE = int(os.environ.get("DOC_BULK_SIZE", 4))
     EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", 16))
+
+    global MINERU
+    MINERU = get_base_config("mineru", {})
+    logging.info(f"Loaded MinerU config to settings.MINERU: {MINERU.keys()}")
 
     os.environ["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] = "1"
 
