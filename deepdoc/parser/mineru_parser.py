@@ -530,7 +530,9 @@ class MinerUParser(RAGFlowPdfParser):
         for ii, (pns, left, right, top, bottom) in enumerate(poss):
             right = left + max_width
 
+            # Ensure bottom > top
             if bottom <= top:
+                self.logger.warning(f"[MinerU][crop] Position {ii}: bottom({bottom}) <= top({top}), adjusting bottom to top + 2")
                 bottom = top + 2
 
             for pn in pns[1:]:
@@ -547,11 +549,32 @@ class MinerUParser(RAGFlowPdfParser):
                 continue
 
             img0 = self.page_images[pns[0]]
+            
+            # Ensure coordinates are valid for cropping
             x0, y0, x1, y1 = int(left), int(top), int(right), int(min(bottom, img0.size[1]))
-            crop0 = img0.crop((x0, y0, x1, y1))
-            imgs.append(crop0)
-            if 0 < ii < len(poss) - 1:
-                positions.append((pns[0] + page_from, x0, x1, y0, y1))
+            
+            # Double-check coordinates before cropping
+            if y1 <= y0:
+                self.logger.warning(f"[MinerU][crop] Position {ii}: y1({y1}) <= y0({y0}), adjusting y1 to y0 + 2")
+                y1 = y0 + 2
+            if x1 <= x0:
+                self.logger.warning(f"[MinerU][crop] Position {ii}: x1({x1}) <= x0({x0}), adjusting x1 to x0 + 2")
+                x1 = x0 + 2
+            
+            # Ensure coordinates are within image bounds
+            y1 = min(y1, img0.size[1])
+            x1 = min(x1, img0.size[0])
+            
+            self.logger.info(f"[MinerU][crop] Position {ii}: cropping with coords ({x0}, {y0}, {x1}, {y1}), img_size={img0.size}")
+            
+            try:
+                crop0 = img0.crop((x0, y0, x1, y1))
+                imgs.append(crop0)
+                if 0 < ii < len(poss) - 1:
+                    positions.append((pns[0] + page_from, x0, x1, y0, y1))
+            except ValueError as e:
+                self.logger.error(f"[MinerU][crop] Position {ii}: crop failed with coords ({x0}, {y0}, {x1}, {y1}): {e}")
+                continue
 
             bottom -= img0.size[1]
             for pn in pns[1:]:
@@ -560,11 +583,24 @@ class MinerUParser(RAGFlowPdfParser):
                         f"[MinerU] Page index {pn} out of range for {page_count} pages during crop; skipping this page.")
                     continue
                 page = self.page_images[pn]
+                
+                # Ensure coordinates are valid
                 x0, y0, x1, y1 = int(left), 0, int(right), int(min(bottom, page.size[1]))
-                cimgp = page.crop((x0, y0, x1, y1))
-                imgs.append(cimgp)
-                if 0 < ii < len(poss) - 1:
-                    positions.append((pn + page_from, x0, x1, y0, y1))
+                if y1 <= y0:
+                    y1 = y0 + 2
+                if x1 <= x0:
+                    x1 = x0 + 2
+                y1 = min(y1, page.size[1])
+                x1 = min(x1, page.size[0])
+                
+                try:
+                    cimgp = page.crop((x0, y0, x1, y1))
+                    imgs.append(cimgp)
+                    if 0 < ii < len(poss) - 1:
+                        positions.append((pn + page_from, x0, x1, y0, y1))
+                except ValueError as e:
+                    self.logger.error(f"[MinerU][crop] Page {pn}: crop failed with coords ({x0}, {y0}, {x1}, {y1}): {e}")
+                    continue
                 bottom -= page.size[1]
 
         if not imgs:
@@ -680,38 +716,204 @@ class MinerUParser(RAGFlowPdfParser):
         return data
 
     def _transfer_to_sections(self, outputs: list[dict[str, Any]], parse_method: str = None):
+        """
+        Transfer MinerU outputs to sections.
+        
+        For 'manual' parse_method:
+        - Groups content by text_level, using level 1 as section boundaries
+        - Returns list of (text, level, poss) tuples where level is the text_level
+        
+        For 'paper' parse_method:
+        - Returns list of (text + position_tag, type) tuples
+        
+        For other parse_methods:
+        - Returns list of (text, position_tag) tuples
+        """
         sections = []
-        for output in outputs:
-            match output["type"]:
-                case MinerUContentType.TEXT:
-                    section = output.get("text", "")
-                case MinerUContentType.TABLE:
-                    section = output.get("table_body", "") + "\n".join(output.get("table_caption", [])) + "\n".join(
-                        output.get("table_footnote", []))
-                    if not section.strip():
-                        section = "FAILED TO PARSE TABLE"
-                case MinerUContentType.IMAGE:
-                    section = "".join(output.get("image_caption", [])) + "\n" + "".join(
-                        output.get("image_footnote", []))
-                case MinerUContentType.EQUATION:
-                    section = output.get("text", "")
-                case MinerUContentType.CODE:
-                    section = output.get("code_body", "") + "\n".join(output.get("code_caption", []))
-                case MinerUContentType.LIST:
-                    section = "\n".join(output.get("list_items", []))
-                case MinerUContentType.DISCARDED:
-                    continue  # Skip discarded blocks entirely
-
-            if section and parse_method == "manual":
-                sections.append((section, output["type"], self._line_tag(output)))
-            elif section and parse_method == "paper":
-                sections.append((section + self._line_tag(output), output["type"]))
-            else:
-                sections.append((section, self._line_tag(output)))
+        
+        if parse_method == "manual":
+            # Group content by text_level, using level 1 as section boundaries
+            current_section_text = []
+            current_section_level = 0
+            current_section_poss = []
+            section_count = 0
+            
+            self.logger.info(f"[MinerU][_transfer_to_sections] Starting with {len(outputs)} outputs for manual parsing")
+            
+            for idx, output in enumerate(outputs):
+                output_type = output.get("type")
+                text_level = output.get("text_level", 0)
+                
+                # Skip discarded blocks
+                if output_type == MinerUContentType.DISCARDED:
+                    continue
+                
+                # Extract text content based on type
+                match output_type:
+                    case MinerUContentType.TEXT:
+                        text = output.get("text", "")
+                    case MinerUContentType.TABLE:
+                        text = output.get("table_body", "") + "\n".join(output.get("table_caption", [])) + "\n".join(
+                            output.get("table_footnote", []))
+                        if not text.strip():
+                            text = "FAILED TO PARSE TABLE"
+                    case MinerUContentType.IMAGE:
+                        text = "".join(output.get("image_caption", [])) + "\n" + "".join(
+                            output.get("image_footnote", []))
+                    case MinerUContentType.EQUATION:
+                        text = output.get("text", "")
+                    case MinerUContentType.CODE:
+                        text = output.get("code_body", "") + "\n".join(output.get("code_caption", []))
+                    case MinerUContentType.LIST:
+                        text = "\n".join(output.get("list_items", []))
+                    case _:
+                        text = ""
+                
+                if not text.strip():
+                    continue
+                
+                # Get position info
+                page_idx = output.get("page_idx", 0)
+                positions = output.get("bbox", (0, 0, 0, 0))
+                x0, top, x1, bott = positions
+                
+                # Convert coordinates from normalized (0-1000) to actual pixel coordinates
+                # Similar to _line_tag method
+                if hasattr(self, "page_images") and self.page_images:
+                    idx = page_idx - getattr(self, "page_from", 0)
+                    if 0 <= idx < len(self.page_images):
+                        page_width, page_height = self.page_images[idx].size
+                        x0 = (x0 / 1000.0) * page_width
+                        x1 = (x1 / 1000.0) * page_width
+                        top = (top / 1000.0) * page_height
+                        bott = (bott / 1000.0) * page_height
+                        self.logger.info(f"[MinerU][_transfer_to_sections] Converted coords for page {page_idx}: ({x0:.1f}, {top:.1f}, {x1:.1f}, {bott:.1f}), page_size=({page_width}, {page_height})")
+                    else:
+                        self.logger.warning(f"[MinerU][_transfer_to_sections] Page index {page_idx} out of range for {len(self.page_images)} images, using raw coords")
+                else:
+                    self.logger.warning(f"[MinerU][_transfer_to_sections] No page images available, using raw coords")
+                
+                poss = ([page_idx], float(x0), float(x1), float(top), float(bott))
+                
+                # If this is a level 1 text (title/heading), start a new section
+                if text_level == 1:
+                    # Save previous section if exists
+                    if current_section_text:
+                        section_text = "\n".join(current_section_text)
+                        sections.append((section_text, current_section_level, current_section_poss))
+                        section_count += 1
+                        self.logger.info(f"[MinerU] Section {section_count}: level={current_section_level}, text_length={len(section_text)}, blocks={len(current_section_text)}")
+                    
+                    # Start new section with this level 1 text
+                    current_section_text = [text]
+                    current_section_level = text_level
+                    current_section_poss = [poss]
+                else:
+                    # Add to current section
+                    current_section_text.append(text)
+                    current_section_poss.append(poss)
+                    # Keep the highest level (lowest number) as the section level
+                    if text_level > 0 and (current_section_level == 0 or text_level < current_section_level):
+                        current_section_level = text_level
+            
+            # Don't forget the last section
+            if current_section_text:
+                section_text = "\n".join(current_section_text)
+                sections.append((section_text, current_section_level, current_section_poss))
+                section_count += 1
+                self.logger.info(f"[MinerU] Section {section_count}: level={current_section_level}, text_length={len(section_text)}, blocks={len(current_section_text)}")
+            
+            self.logger.info(f"[MinerU][_transfer_to_sections] Created {len(sections)} sections from {len(outputs)} outputs")
+            
+        elif parse_method == "paper":
+            # Original paper parsing logic
+            for output in outputs:
+                match output["type"]:
+                    case MinerUContentType.TEXT:
+                        section = output.get("text", "")
+                    case MinerUContentType.TABLE:
+                        section = output.get("table_body", "") + "\n".join(output.get("table_caption", [])) + "\n".join(
+                            output.get("table_footnote", []))
+                        if not section.strip():
+                            section = "FAILED TO PARSE TABLE"
+                    case MinerUContentType.IMAGE:
+                        section = "".join(output.get("image_caption", [])) + "\n" + "".join(
+                            output.get("image_footnote", []))
+                    case MinerUContentType.EQUATION:
+                        section = output.get("text", "")
+                    case MinerUContentType.CODE:
+                        section = output.get("code_body", "") + "\n".join(output.get("code_caption", []))
+                    case MinerUContentType.LIST:
+                        section = "\n".join(output.get("list_items", []))
+                    case MinerUContentType.DISCARDED:
+                        continue
+                
+                if section:
+                    sections.append((section + self._line_tag(output), output["type"]))
+        else:
+            # Original default parsing logic
+            for output in outputs:
+                match output["type"]:
+                    case MinerUContentType.TEXT:
+                        section = output.get("text", "")
+                    case MinerUContentType.TABLE:
+                        section = output.get("table_body", "") + "\n".join(output.get("table_caption", [])) + "\n".join(
+                            output.get("table_footnote", []))
+                        if not section.strip():
+                            section = "FAILED TO PARSE TABLE"
+                    case MinerUContentType.IMAGE:
+                        section = "".join(output.get("image_caption", [])) + "\n" + "".join(
+                            output.get("image_footnote", []))
+                    case MinerUContentType.EQUATION:
+                        section = output.get("text", "")
+                    case MinerUContentType.CODE:
+                        section = output.get("code_body", "") + "\n".join(output.get("code_caption", []))
+                    case MinerUContentType.LIST:
+                        section = "\n".join(output.get("list_items", []))
+                    case MinerUContentType.DISCARDED:
+                        continue
+                
+                if section:
+                    sections.append((section, self._line_tag(output)))
+        
         return sections
 
     def _transfer_to_tables(self, outputs: list[dict[str, Any]]):
-        return []
+        tables = []
+        table_count = 0
+        self.logger.info(f"[MinerU][_transfer_to_tables] Starting with {len(outputs)} outputs")
+        for output in outputs:
+            if output.get("type") == MinerUContentType.TABLE:
+                table_count += 1
+                table_body = output.get("table_body", "")
+                table_caption = "\n".join(output.get("table_caption", []))
+                table_footnote = "\n".join(output.get("table_footnote", []))
+                
+                if not table_body.strip():
+                    table_body = "FAILED TO PARSE TABLE"
+                
+                full_table = table_body
+                if table_caption:
+                    full_table = table_caption + "\n" + full_table
+                if table_footnote:
+                    full_table = full_table + "\n" + table_footnote
+                
+                img_path = output.get("img_path", "")
+                
+                # Build position tuple directly (pn_list, left, right, top, bottom)
+                positions = output.get("bbox", (0, 0, 0, 0))
+                x0, top, x1, bott = positions
+                page_idx = output.get("page_idx", 0)
+                
+                # Convert to the format expected by manual.py: [(pn_list, left, right, top, bottom), ...]
+                # where pn_list is [page_idx] (0-indexed)
+                poss = [([page_idx], float(x0), float(x1), float(top), float(bott))]
+                
+                tables.append(((img_path, full_table), poss))
+                self.logger.info(f"[MinerU] Extracted table {table_count}: caption='{table_caption[:50] if table_caption else 'N/A'}', body_length={len(table_body)}, img_path={img_path}")
+                self.logger.info(f"[MinerU] Table {table_count} poss format: {poss}")
+        self.logger.info(f"[MinerU] Total tables extracted: {table_count}, returning {len(tables)} tables")
+        return tables
 
     def parse_pdf(
             self,

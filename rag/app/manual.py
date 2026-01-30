@@ -219,7 +219,7 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
         if isinstance(layout_recognizer, bool):
             layout_recognizer = "DeepDOC" if layout_recognizer else "Plain Text"
 
-        name = layout_recognizer.strip().lower()
+        name = layout_recognizer.strip().strip('"').strip("'").lower()
         pdf_parser = PARSERS.get(name, by_plaintext)
         callback(0.1, "Start to parse.")
 
@@ -245,6 +245,15 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
         if tbls is None:
             tbls = []
 
+        # Check if sections are from MinerU with (text, level, poss) format
+        is_mineru_format = False
+        if sections and len(sections[0]) == 3:
+            # MinerU format: (text, level, poss_list) where level is an int
+            _, second, third = sections[0]
+            if isinstance(second, int) and isinstance(third, list):
+                is_mineru_format = True
+                logging.info(f"[Manual] Detected MinerU format sections: {len(sections)} sections with levels")
+
         def _normalize_section(section):
             # pad section to length 3: (txt, sec_id, poss)
             if len(section) == 1:
@@ -255,7 +264,19 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
                 raise ValueError(f"Unexpected section length: {len(section)} (value={section!r})")
 
             txt, layoutno, poss = section
-            if isinstance(poss, str):
+            
+            # Handle MinerU format: poss is a list of position tuples
+            if isinstance(poss, list) and poss and len(poss) > 0:
+                # poss is [([page], left, right, top, bottom), ...]
+                new_poss = []
+                for p in poss:
+                    if isinstance(p, tuple) and len(p) == 5:
+                        pn, left, right, top, bottom = p
+                        if isinstance(pn, list) and pn:
+                            pn = pn[0]  # [page] -> page
+                        new_poss.append((pn, left, right, top, bottom))
+                poss = new_poss
+            elif isinstance(poss, str):
                 poss = pdf_parser.extract_positions(poss)
                 if poss:
                     first = poss[0]  # tuple: ([pn], x1, x2, y1, y2)
@@ -273,10 +294,26 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
 
         if name in ["tcadp", "docling", "mineru", "paddleocr"]:
             parser_config["chunk_token_num"] = 0
+            logging.info(f"[Manual] Parser '{name}' detected, chunk_token_num set to 0 (trust parser's segmentation)")
+        else:
+            logging.info(f"[Manual] Parser '{name}' using chunk_token_num={parser_config.get('chunk_token_num', 512)}")
 
         callback(0.8, "Finish parsing.")
 
-        if len(sections) > 0 and len(pdf_parser.outlines) / len(sections) > 0.03:
+        # Use MinerU provided levels directly if available
+        if is_mineru_format:
+            logging.info(f"[Manual] Using MinerU provided text_level for section grouping")
+            # sections are already (text, level, poss) from MinerU
+            levels = [lvl for _, lvl, _ in sections]
+            # Find the most common level (excluding 0 which means no specific level)
+            from collections import Counter
+            level_counts = Counter([l for l in levels if l > 0])
+            if level_counts:
+                most_level = level_counts.most_common(1)[0][0]
+            else:
+                most_level = 1
+            logging.info(f"[Manual] MinerU levels: {levels}, most_level={most_level}")
+        elif len(sections) > 0 and len(pdf_parser.outlines) / len(sections) > 0.03:
             max_lvl = max([lvl for _, lvl in pdf_parser.outlines])
             most_level = max(0, max_lvl - 1)
             levels = []
@@ -303,10 +340,26 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
             sec_ids.append(sid)
 
         sections = [(txt, sec_ids[i], poss) for i, (txt, _, poss) in enumerate(sections)]
-        for (img, rows), poss in tbls:
+        logging.info(f"[Manual] Processing {len(tbls)} tables, from_page={from_page}")
+        for idx, ((img, rows), poss) in enumerate(tbls):
             if not rows:
+                logging.info(f"[Manual] Table {idx}: empty rows, skipping")
                 continue
-            sections.append((rows if isinstance(rows, str) else rows[0], -1, [(p[0] + 1 - from_page, p[1], p[2], p[3], p[4]) for p in poss]))
+            logging.info(f"[Manual] Table {idx}: img={img is not None}, rows_length={len(rows) if isinstance(rows, str) else len(rows[0]) if rows else 0}")
+            logging.info(f"[Manual] Table {idx}: poss type={type(poss)}, poss={poss}")
+            try:
+                new_poss = []
+                for p_idx, p in enumerate(poss):
+                    logging.info(f"[Manual] Table {idx}, poss[{p_idx}]: p type={type(p)}, p={p}")
+                    logging.info(f"[Manual] Table {idx}, poss[{p_idx}]: p[0] type={type(p[0])}, p[0]={p[0]}")
+                    new_p = (p[0][0] + 1 - from_page, p[1], p[2], p[3], p[4])
+                    new_poss.append(new_p)
+                    logging.info(f"[Manual] Table {idx}, poss[{p_idx}]: new_p={new_p}")
+                sections.append((rows if isinstance(rows, str) else rows[0], -1, new_poss))
+                logging.info(f"[Manual] Table {idx}: successfully added to sections")
+            except Exception as e:
+                logging.error(f"[Manual] Table {idx}: ERROR processing poss: {e}, poss={poss}")
+                raise
 
         def tag(pn, left, right, top, bottom):
             if pn + left + right + top + bottom == 0:
@@ -327,6 +380,24 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
             tk_cnt = num_tokens_from_string(txt)
             if sec_id > -1:
                 last_sid = sec_id
+        logging.info(f"[Manual] Generated {len(chunks)} text chunks from {len(sections)} sections (chunk_token_num={parser_config.get('chunk_token_num', 512)})")
+        logging.info(f"[Manual] Found {len(tbls)} tables to process")
+        
+        # Fix poss format in tbls: convert from [([page], left, right, top, bottom)] to [(page, left, right, top, bottom)]
+        fixed_tbls = []
+        for (img, rows), poss in tbls:
+            fixed_poss = []
+            for p in poss:
+                # p is ([page_idx], left, right, top, bottom) or (page_idx, left, right, top, bottom)
+                if isinstance(p[0], list):
+                    fixed_p = (p[0][0], p[1], p[2], p[3], p[4])
+                else:
+                    fixed_p = p
+                fixed_poss.append(fixed_p)
+            fixed_tbls.append(((img, rows), fixed_poss))
+        tbls = fixed_tbls
+        logging.info(f"[Manual] Fixed {len(tbls)} tables poss format")
+        
         tbls = vision_figure_parser_pdf_wrapper(
             tbls=tbls,
             sections=sections,
@@ -334,7 +405,9 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
             **kwargs,
         )
         res = tokenize_table(tbls, doc, eng)
+        logging.info(f"[Manual] Tokenized {len(res)} table chunks")
         res.extend(tokenize_chunks(chunks, doc, eng, pdf_parser))
+        logging.info(f"[Manual] Final total chunks: {len(res)} (tables + text)")
         table_ctx = max(0, int(parser_config.get("table_context_size", 0) or 0))
         image_ctx = max(0, int(parser_config.get("image_context_size", 0) or 0))
         if table_ctx or image_ctx:

@@ -374,35 +374,62 @@ def tokenize_chunks_with_images(chunks, doc, eng, images, child_delimiters_patte
 
 def tokenize_table(tbls, doc, eng, batch_size=10):
     res = []
+    logging.info(f"[tokenize_table] Starting with {len(tbls)} tables")
     # add tables
-    for (img, rows), poss in tbls:
+    for idx, ((img, rows), poss) in enumerate(tbls):
+        logging.info(f"[tokenize_table] Table {idx}: img={img is not None}, rows_type={type(rows)}, poss_type={type(poss)}")
         if not rows:
+            logging.info(f"[tokenize_table] Table {idx}: empty rows, skipping")
             continue
         if isinstance(rows, str):
+            logging.info(f"[tokenize_table] Table {idx}: processing as string, rows_length={len(rows)}")
             d = copy.deepcopy(doc)
             tokenize(d, rows, eng)
             d["content_with_weight"] = rows
             d["doc_type_kwd"] = "table"
             if img:
-                d["image"] = img
+                # Load image from path if it's a string
+                if isinstance(img, str):
+                    try:
+                        pil_img = Image.open(img)
+                        d["image"] = pil_img
+                        logging.info(f"[tokenize_table] Table {idx}: loaded image from path: {img}")
+                    except Exception as e:
+                        logging.error(f"[tokenize_table] Table {idx}: failed to load image from {img}: {e}")
+                        d["image"] = None
+                else:
+                    d["image"] = img
                 if d["content_with_weight"].find("<tr>") < 0:
                     d["doc_type_kwd"] = "image"
             if poss:
+                logging.info(f"[tokenize_table] Table {idx}: calling add_positions with poss={poss}")
                 add_positions(d, poss)
             res.append(d)
             continue
         de = "; " if eng else "； "
+        logging.info(f"[tokenize_table] Table {idx}: processing as list, len={len(rows)}")
         for i in range(0, len(rows), batch_size):
             d = copy.deepcopy(doc)
             r = de.join(rows[i:i + batch_size])
             tokenize(d, r, eng)
             d["doc_type_kwd"] = "table"
             if img:
-                d["image"] = img
+                # Load image from path if it's a string
+                if isinstance(img, str):
+                    try:
+                        pil_img = Image.open(img)
+                        d["image"] = pil_img
+                        logging.info(f"[tokenize_table] Table {idx}: loaded image from path: {img}")
+                    except Exception as e:
+                        logging.error(f"[tokenize_table] Table {idx}: failed to load image from {img}: {e}")
+                        d["image"] = None
+                else:
+                    d["image"] = img
                 if d["content_with_weight"].find("<tr>") < 0:
                     d["doc_type_kwd"] = "image"
             add_positions(d, poss)
             res.append(d)
+    logging.info(f"[tokenize_table] Finished, returning {len(res)} table chunks")
     return res
 
 
@@ -832,16 +859,19 @@ def append_context2table_image4pdf(sections: list, tabls: list, table_context_si
 def add_positions(d, poss):
     if not poss:
         return
+    logging.info(f"[add_positions] Starting with {len(poss)} positions")
     page_num_int = []
     position_int = []
     top_int = []
-    for pn, left, right, top, bottom in poss:
+    for idx, (pn, left, right, top, bottom) in enumerate(poss):
+        logging.info(f"[add_positions] Position {idx}: pn={pn}, type={type(pn)}, left={left}, right={right}, top={top}, bottom={bottom}")
         page_num_int.append(int(pn + 1))
         top_int.append(int(top))
         position_int.append((int(pn + 1), int(left), int(right), int(top), int(bottom)))
     d["page_num_int"] = page_num_int
     d["position_int"] = position_int
     d["top_int"] = top_int
+    logging.info(f"[add_positions] Finished: page_num_int={page_num_int}")
 
 
 def remove_contents_table(sections, eng=False):
