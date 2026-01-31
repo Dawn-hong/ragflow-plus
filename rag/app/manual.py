@@ -420,14 +420,25 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
         text_chunks = tokenize_chunks(chunks, doc, eng, pdf_parser)
         logging.info(f"[Manual] Tokenized {len(table_chunks)} table chunks and {len(text_chunks)} text chunks")
         
-        # Log first few table and text chunks for debugging
-        for idx, tc in enumerate(table_chunks[:3]):
+        # Log ALL table chunks for debugging table splitting issues
+        logging.info(f"[Manual] ===== TABLE CHUNKS DEBUG START =====")
+        for idx, tc in enumerate(table_chunks):
             pos = tc.get('position_int', [])
-            content = tc.get('content_with_weight', '')[:50]
-            logging.info(f"[Manual] Table chunk {idx}: position_int={pos}, content={content}...")
-        for idx, tc in enumerate(text_chunks[:3]):
+            content = tc.get('content_with_weight', '')
+            doc_type = tc.get('doc_type_kwd', 'unknown')
+            # Extract caption if present
+            caption_match = ""
+            if "<caption>" in content:
+                cap_match = re.search(r'<caption>(.*?)</caption>', content)
+                if cap_match:
+                    caption_match = cap_match.group(1)[:50]
+            logging.info(f"[Manual] Table chunk {idx}: type={doc_type}, page={pos[0][0] if pos else 'N/A'}, top={pos[0][3] if pos else 'N/A'}, caption='{caption_match}', content_length={len(content)}")
+        logging.info(f"[Manual] ===== TABLE CHUNKS DEBUG END =====")
+        
+        # Log first few text chunks for debugging
+        for idx, tc in enumerate(text_chunks[:5]):
             pos = tc.get('position_int', [])
-            content = tc.get('content_with_weight', '')[:50]
+            content = tc.get('content_with_weight', '')[:80]
             logging.info(f"[Manual] Text chunk {idx}: position_int={pos}, content={content}...")
         
         # Merge table_chunks and text_chunks by position (page, top)

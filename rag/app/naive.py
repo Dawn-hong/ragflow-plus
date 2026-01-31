@@ -116,6 +116,50 @@ def by_mineru(
             except Exception as e:
                 logging.error(f"Failed to parse pdf via LLMBundle MinerU ({mineru_llm_name}): {e}")
 
+    # Fallback: if LLMBundle failed or model not found in DB, try direct instantiation based on config
+    try:
+        from common.config_utils import get_base_config
+        from deepdoc.parser.mineru_parser import MinerUParser
+        
+        logging.info("[Naive] Attempting MinerU fallback...")
+        mineru_conf = get_base_config("mineru", {})
+        logging.info(f"[Naive] Read mineru_conf keys: {list(mineru_conf.keys()) if mineru_conf else 'None'}")
+        
+        token = mineru_conf.get("token") or os.environ.get("MINERU_TOKEN")
+        logging.info(f"[Naive] MinerU token found: {'Yes' if token else 'No'} (Preview: {token[:10] if token else 'None'}...)")
+        
+        if token:
+            logging.info(f"[Naive] Fallback: Instantiating MinerUParser directly")
+            
+            # Extract config values
+            mineru_api = mineru_conf.get("apiserver") or os.environ.get("MINERU_APISERVER", "")
+            mineru_server_url = mineru_conf.get("server_url") or os.environ.get("MINERU_SERVER_URL", "")
+            mineru_model_version = mineru_conf.get("model_version") or os.environ.get("MINERU_MODEL_VERSION", "vlm")
+            
+            pdf_parser = MinerUParser(
+                mineru_token=token,
+                mineru_api=mineru_api,
+                mineru_server_url=mineru_server_url,
+                model_version=mineru_model_version
+            )
+            
+            sections, tables = pdf_parser.parse_pdf(
+                filepath=filename,
+                binary=binary,
+                callback=callback,
+                parse_method=parse_method,
+                lang=lang,
+                from_page=from_page,
+                to_page=to_page,
+                **kwargs,
+            )
+            return sections, tables, pdf_parser
+        else:
+            logging.warning("[Naive] MinerU token is missing in fallback path.")
+            
+    except Exception as e:
+        logging.error(f"[Naive] Direct MinerU instantiation fallback failed: {e}", exc_info=True)
+
     if callback:
         callback(-1, "MinerU not found.")
     return None, None, None

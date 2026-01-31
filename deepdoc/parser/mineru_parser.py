@@ -740,7 +740,17 @@ class MinerUParser(RAGFlowPdfParser):
             
             self.logger.info(f"[MinerU][_transfer_to_sections] Starting with {len(outputs)} outputs for manual parsing")
             
+            # Get caption indices from _transfer_to_tables (should be called before this)
+            caption_indices = getattr(self, '_caption_indices', set())
+            if caption_indices:
+                self.logger.info(f"[MinerU][_transfer_to_sections] Will skip {len(caption_indices)} titles used as table captions")
+            
             for idx, output in enumerate(outputs):
+                # Skip titles that have been used as table captions
+                if idx in caption_indices:
+                    self.logger.info(f"[MinerU][_transfer_to_sections] Skipping idx={idx} (used as table caption): '{output.get('text', '')[:50]}'")
+                    continue
+                
                 output_type = output.get("type")
                 text_level = output.get("text_level", 0)
                 
@@ -891,26 +901,106 @@ class MinerUParser(RAGFlowPdfParser):
         return sections
 
     def _transfer_to_tables(self, outputs: list[dict[str, Any]]):
+        """
+        Transfer MinerU table outputs to table format for manual.py.
+        Includes logic to:
+        1. Merge table fragments that MinerU may split across pages
+        2. Detect text_level=1 titles immediately before tables and use them as captions
+        """
         tables = []
         table_count = 0
         skipped_count = 0
+        merged_count = 0
+        title_merged_count = 0
+        
+        # Track which output indices have been used as table captions
+        self._caption_indices = set()
+        
+        # Pending caption/footnote from previous empty-body table for merging
+        pending_caption = None
+        pending_footnote = None
+        pending_page_idx = None
+        
         self.logger.info(f"[MinerU][_transfer_to_tables] Starting with {len(outputs)} outputs")
-        for output in outputs:
+        
+        for idx, output in enumerate(outputs):
             if output.get("type") == MinerUContentType.TABLE:
                 table_count += 1
                 table_body = output.get("table_body", "")
                 table_caption = "\n".join(output.get("table_caption", []))
                 table_footnote = "\n".join(output.get("table_footnote", []))
+                page_idx = output.get("page_idx", 0)
                 
-                # Skip tables with empty body (MinerU may split one table into multiple blocks)
+                self.logger.info(f"[MinerU][_transfer_to_tables] Table {table_count}: page={page_idx}, caption='{table_caption[:30] if table_caption else 'N/A'}', body_length={len(table_body)}, has_footnote={bool(table_footnote)}")
+                
+                # Handle empty body table - save caption/footnote for potential merge
                 if not table_body.strip():
                     skipped_count += 1
-                    self.logger.info(f"[MinerU] Skipping table {table_count}: empty body, caption='{table_caption[:50] if table_caption else 'N/A'}'")
+                    self.logger.info(f"[MinerU][_transfer_to_tables] Table {table_count}: empty body, saving caption for potential merge")
+                    # Save caption if present for next table
+                    if table_caption:
+                        pending_caption = table_caption
+                        pending_page_idx = page_idx
+                        self.logger.info(f"[MinerU][_transfer_to_tables] Saved pending caption: '{pending_caption[:50]}'")
+                    if table_footnote:
+                        pending_footnote = table_footnote
+                        self.logger.info(f"[MinerU][_transfer_to_tables] Saved pending footnote: '{pending_footnote[:50]}'")
                     continue
                 
+                # Build full table with caption and footnote
                 full_table = table_body
+                
+                # Check if we should merge with pending caption from previous empty table
+                if pending_caption and not table_caption:
+                    self.logger.info(f"[MinerU][_transfer_to_tables] Merging pending caption '{pending_caption[:30]}...' with current table body")
+                    table_caption = pending_caption
+                    merged_count += 1
+                    pending_caption = None
+                    pending_page_idx = None
+                elif pending_caption:
+                    self.logger.info(f"[MinerU][_transfer_to_tables] Discarding pending caption (current table has own caption)")
+                    pending_caption = None
+                    pending_page_idx = None
+                
+                # Similarly handle pending footnote
+                if pending_footnote and not table_footnote:
+                    self.logger.info(f"[MinerU][_transfer_to_tables] Merging pending footnote with current table")
+                    table_footnote = pending_footnote
+                    pending_footnote = None
+                elif pending_footnote:
+                    pending_footnote = None
+                
+                # NEW: Check for preceding text_level=1 title if no caption
+                if not table_caption:
+                    # Look backwards for immediately preceding text with text_level=1
+                    for prev_idx in range(idx - 1, max(idx - 3, -1), -1):  # Check up to 2 items back
+                        prev_output = outputs[prev_idx]
+                        prev_type = prev_output.get("type")
+                        
+                        # Skip discarded blocks
+                        if prev_type == MinerUContentType.DISCARDED:
+                            continue
+                        
+                        # Check if it's a text with text_level=1 on same page
+                        if prev_type == MinerUContentType.TEXT:
+                            prev_text_level = prev_output.get("text_level", 0)
+                            prev_page_idx = prev_output.get("page_idx", -1)
+                            prev_text = prev_output.get("text", "")
+                            
+                            if prev_text_level == 1 and prev_page_idx == page_idx and prev_text:
+                                # Found a title immediately before this table
+                                table_caption = prev_text
+                                self._caption_indices.add(prev_idx)
+                                title_merged_count += 1
+                                self.logger.info(f"[MinerU][_transfer_to_tables] Found preceding title for table {table_count}: '{prev_text[:50]}' (idx={prev_idx})")
+                                break
+                        else:
+                            # Hit another type of content, stop searching
+                            break
+                
+                # Build full table content
                 if table_caption:
-                    full_table = table_caption + "\n" + full_table
+                    full_table = f"<caption>{table_caption}</caption>\n" + full_table
                 if table_footnote:
                     full_table = full_table + "\n" + table_footnote
                 
@@ -919,14 +1009,12 @@ class MinerUParser(RAGFlowPdfParser):
                 # Build position tuple directly (pn_list, left, right, top, bottom)
                 positions = output.get("bbox", (0, 0, 0, 0))
                 x0, top, x1, bott = positions
-                page_idx = output.get("page_idx", 0)
                 
                 # Convert coordinates from normalized (0-1000) to actual pixel coordinates
-                # Similar to _line_tag method and _transfer_to_sections
                 if hasattr(self, "page_images") and self.page_images:
-                    idx = page_idx - getattr(self, "page_from", 0)
-                    if 0 <= idx < len(self.page_images):
-                        page_width, page_height = self.page_images[idx].size
+                    img_idx = page_idx - getattr(self, "page_from", 0)
+                    if 0 <= img_idx < len(self.page_images):
+                        page_width, page_height = self.page_images[img_idx].size
                         x0 = (x0 / 1000.0) * page_width
                         x1 = (x1 / 1000.0) * page_width
                         top = (top / 1000.0) * page_height
@@ -938,15 +1026,15 @@ class MinerUParser(RAGFlowPdfParser):
                     self.logger.warning(f"[MinerU][_transfer_to_tables] No page images available, using raw coords")
                 
                 # Convert to the format expected by manual.py: [(pn_list, left, right, top, bottom), ...]
-                # where pn_list is [page_idx] (0-indexed)
                 poss = [([page_idx], float(x0), float(x1), float(top), float(bott))]
                 
                 tables.append(((img_path, full_table), poss))
-                self.logger.info(f"[MinerU] Extracted table {table_count}: caption='{table_caption[:50] if table_caption else 'N/A'}', body_length={len(table_body)}, full_table_length={len(full_table)}")
-                self.logger.info(f"[MinerU] Table {table_count} poss format: {poss}, page_idx={page_idx}")
+                self.logger.info(f"[MinerU][_transfer_to_tables] Extracted table {table_count}: caption='{table_caption[:50] if table_caption else 'N/A'}', body_length={len(table_body)}, full_table_length={len(full_table)}")
+                self.logger.info(f"[MinerU][_transfer_to_tables] Table {table_count} poss format: {poss}, page_idx={page_idx}")
                 # Log full table content preview for debugging
-                self.logger.info(f"[MinerU] Table {table_count} content preview: {full_table[:100]}...")
-        self.logger.info(f"[MinerU] Total tables: {table_count}, extracted: {len(tables)}, skipped: {skipped_count}")
+                self.logger.info(f"[MinerU][_transfer_to_tables] Table {table_count} content preview: {full_table[:100]}...")
+        
+        self.logger.info(f"[MinerU][_transfer_to_tables] Total tables: {table_count}, extracted: {len(tables)}, skipped: {skipped_count}, merged: {merged_count}, title_merged: {title_merged_count}")
         return tables
 
     def parse_pdf(
@@ -1035,7 +1123,11 @@ class MinerUParser(RAGFlowPdfParser):
             if callback:
                 callback(0.75, f"[MinerU] Parsed {len(filtered_outputs)} blocks from PDF.")
 
-            return self._transfer_to_sections(filtered_outputs, parse_method), self._transfer_to_tables(filtered_outputs)
+            # IMPORTANT: Call _transfer_to_tables FIRST to populate _caption_indices
+            # Then _transfer_to_sections will use _caption_indices to filter out titles used as captions
+            tables = self._transfer_to_tables(filtered_outputs)
+            sections = self._transfer_to_sections(filtered_outputs, parse_method)
+            return sections, tables
         finally:
             if temp_pdf and temp_pdf.exists():
                 try:
