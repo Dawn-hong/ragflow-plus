@@ -753,10 +753,22 @@ class MinerUParser(RAGFlowPdfParser):
                     case MinerUContentType.TEXT:
                         text = output.get("text", "")
                     case MinerUContentType.TABLE:
-                        text = output.get("table_body", "") + "\n".join(output.get("table_caption", [])) + "\n".join(
-                            output.get("table_footnote", []))
-                        if not text.strip():
-                            text = "FAILED TO PARSE TABLE"
+                        # Tables are handled by _transfer_to_tables, but we need to end current section
+                        # to ensure proper ordering between text and tables
+                        table_body = output.get("table_body", "")
+                        if table_body.strip():
+                            self.logger.info(f"[MinerU][_transfer_to_sections] Table on page {output.get('page_idx', 0)} will be handled by _transfer_to_tables, ending current section")
+                            # End current section if exists, so table doesn't get merged with unrelated text
+                            if current_section_text:
+                                section_text = "\n".join(current_section_text)
+                                sections.append((section_text, current_section_level, current_section_poss))
+                                section_count += 1
+                                self.logger.info(f"[MinerU] Section {section_count}: level={current_section_level}, text_length={len(section_text)}, blocks={len(current_section_text)} (ended before table)")
+                                # Reset current section
+                                current_section_text = []
+                                current_section_level = 0
+                                current_section_poss = []
+                        continue
                     case MinerUContentType.IMAGE:
                         text = "".join(output.get("image_caption", [])) + "\n" + "".join(
                             output.get("image_footnote", []))
@@ -881,6 +893,7 @@ class MinerUParser(RAGFlowPdfParser):
     def _transfer_to_tables(self, outputs: list[dict[str, Any]]):
         tables = []
         table_count = 0
+        skipped_count = 0
         self.logger.info(f"[MinerU][_transfer_to_tables] Starting with {len(outputs)} outputs")
         for output in outputs:
             if output.get("type") == MinerUContentType.TABLE:
@@ -889,8 +902,11 @@ class MinerUParser(RAGFlowPdfParser):
                 table_caption = "\n".join(output.get("table_caption", []))
                 table_footnote = "\n".join(output.get("table_footnote", []))
                 
+                # Skip tables with empty body (MinerU may split one table into multiple blocks)
                 if not table_body.strip():
-                    table_body = "FAILED TO PARSE TABLE"
+                    skipped_count += 1
+                    self.logger.info(f"[MinerU] Skipping table {table_count}: empty body, caption='{table_caption[:50] if table_caption else 'N/A'}'")
+                    continue
                 
                 full_table = table_body
                 if table_caption:
@@ -905,14 +921,32 @@ class MinerUParser(RAGFlowPdfParser):
                 x0, top, x1, bott = positions
                 page_idx = output.get("page_idx", 0)
                 
+                # Convert coordinates from normalized (0-1000) to actual pixel coordinates
+                # Similar to _line_tag method and _transfer_to_sections
+                if hasattr(self, "page_images") and self.page_images:
+                    idx = page_idx - getattr(self, "page_from", 0)
+                    if 0 <= idx < len(self.page_images):
+                        page_width, page_height = self.page_images[idx].size
+                        x0 = (x0 / 1000.0) * page_width
+                        x1 = (x1 / 1000.0) * page_width
+                        top = (top / 1000.0) * page_height
+                        bott = (bott / 1000.0) * page_height
+                        self.logger.info(f"[MinerU][_transfer_to_tables] Converted coords for table {table_count} on page {page_idx}: ({x0:.1f}, {top:.1f}, {x1:.1f}, {bott:.1f}), page_size=({page_width}, {page_height})")
+                    else:
+                        self.logger.warning(f"[MinerU][_transfer_to_tables] Page index {page_idx} out of range for {len(self.page_images)} images, using raw coords")
+                else:
+                    self.logger.warning(f"[MinerU][_transfer_to_tables] No page images available, using raw coords")
+                
                 # Convert to the format expected by manual.py: [(pn_list, left, right, top, bottom), ...]
                 # where pn_list is [page_idx] (0-indexed)
                 poss = [([page_idx], float(x0), float(x1), float(top), float(bott))]
                 
                 tables.append(((img_path, full_table), poss))
-                self.logger.info(f"[MinerU] Extracted table {table_count}: caption='{table_caption[:50] if table_caption else 'N/A'}', body_length={len(table_body)}, img_path={img_path}")
-                self.logger.info(f"[MinerU] Table {table_count} poss format: {poss}")
-        self.logger.info(f"[MinerU] Total tables extracted: {table_count}, returning {len(tables)} tables")
+                self.logger.info(f"[MinerU] Extracted table {table_count}: caption='{table_caption[:50] if table_caption else 'N/A'}', body_length={len(table_body)}, full_table_length={len(full_table)}")
+                self.logger.info(f"[MinerU] Table {table_count} poss format: {poss}, page_idx={page_idx}")
+                # Log full table content preview for debugging
+                self.logger.info(f"[MinerU] Table {table_count} content preview: {full_table[:100]}...")
+        self.logger.info(f"[MinerU] Total tables: {table_count}, extracted: {len(tables)}, skipped: {skipped_count}")
         return tables
 
     def parse_pdf(

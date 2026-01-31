@@ -335,66 +335,76 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
         sec_ids = []
         sid = 0
         for i, lvl in enumerate(levels):
-            if lvl <= most_level and i > 0 and lvl != levels[i - 1]:
+            if is_mineru_format:
+                # For MinerU format, each section should be independent to preserve ordering
+                # Don't merge sections with the same level
+                sid += 1
+            elif lvl <= most_level and i > 0 and lvl != levels[i - 1]:
                 sid += 1
             sec_ids.append(sid)
 
         sections = [(txt, sec_ids[i], poss) for i, (txt, _, poss) in enumerate(sections)]
+        logging.info(f"[Manual] Assigned sec_ids: {sec_ids[:10]}... (showing first 10)")
         logging.info(f"[Manual] Processing {len(tbls)} tables, from_page={from_page}")
-        for idx, ((img, rows), poss) in enumerate(tbls):
-            if not rows:
-                logging.info(f"[Manual] Table {idx}: empty rows, skipping")
-                continue
-            logging.info(f"[Manual] Table {idx}: img={img is not None}, rows_length={len(rows) if isinstance(rows, str) else len(rows[0]) if rows else 0}")
-            logging.info(f"[Manual] Table {idx}: poss type={type(poss)}, poss={poss}")
-            try:
-                new_poss = []
-                for p_idx, p in enumerate(poss):
-                    logging.info(f"[Manual] Table {idx}, poss[{p_idx}]: p type={type(p)}, p={p}")
-                    logging.info(f"[Manual] Table {idx}, poss[{p_idx}]: p[0] type={type(p[0])}, p[0]={p[0]}")
-                    new_p = (p[0][0] + 1 - from_page, p[1], p[2], p[3], p[4])
-                    new_poss.append(new_p)
-                    logging.info(f"[Manual] Table {idx}, poss[{p_idx}]: new_p={new_p}")
-                sections.append((rows if isinstance(rows, str) else rows[0], -1, new_poss))
-                logging.info(f"[Manual] Table {idx}: successfully added to sections")
-            except Exception as e:
-                logging.error(f"[Manual] Table {idx}: ERROR processing poss: {e}, poss={poss}")
-                raise
+        # Note: Tables are NOT added to sections here to avoid duplication.
+        # They will be processed separately by tokenize_table and merged later.
 
         def tag(pn, left, right, top, bottom):
             if pn + left + right + top + bottom == 0:
                 return ""
-            return "@@{}\t{:.1f}\t{:.1f}\t{:.1f}\t{:.1f}##".format(pn, left, right, top, bottom)
+            # pn is 0-indexed page_idx, add 1 to make it 1-indexed for display
+            return "@@{}\t{:.1f}\t{:.1f}\t{:.1f}\t{:.1f}##".format(pn + 1, left, right, top, bottom)
 
         chunks = []
         last_sid = -2
         tk_cnt = 0
-        for txt, sec_id, poss in sorted(sections, key=lambda x: (x[-1][0][0], x[-1][0][3], x[-1][0][1])):
+        # For MinerU format, don't sort sections to preserve original order from JSON
+        # This ensures tables and text are processed in the correct sequence
+        if is_mineru_format:
+            logging.info(f"[Manual] Preserving original section order for MinerU format (no sorting)")
+            sections_to_process = sections
+        else:
+            sections_to_process = sorted(sections, key=lambda x: (x[-1][0][0], x[-1][0][3], x[-1][0][1]))
+        for txt, sec_id, poss in sections_to_process:
             poss = "\t".join([tag(*pos) for pos in poss])
-            if tk_cnt < 32 or (tk_cnt < 1024 and (sec_id == last_sid or sec_id == -1)):
+            # For MinerU format, don't merge sections to preserve each section as independent chunk
+            if is_mineru_format:
+                chunks.append(txt + poss)
+                tk_cnt = num_tokens_from_string(txt)
+                last_sid = sec_id
+            elif tk_cnt < 32 or (tk_cnt < 1024 and (sec_id == last_sid or sec_id == -1)):
                 if chunks:
                     chunks[-1] += "\n" + txt + poss
                     tk_cnt += num_tokens_from_string(txt)
                     continue
-            chunks.append(txt + poss)
-            tk_cnt = num_tokens_from_string(txt)
-            if sec_id > -1:
-                last_sid = sec_id
+                chunks.append(txt + poss)
+                tk_cnt = num_tokens_from_string(txt)
+                if sec_id > -1:
+                    last_sid = sec_id
+            else:
+                chunks.append(txt + poss)
+                tk_cnt = num_tokens_from_string(txt)
+                if sec_id > -1:
+                    last_sid = sec_id
         logging.info(f"[Manual] Generated {len(chunks)} text chunks from {len(sections)} sections (chunk_token_num={parser_config.get('chunk_token_num', 512)})")
         logging.info(f"[Manual] Found {len(tbls)} tables to process")
         
         # Fix poss format in tbls: convert from [([page], left, right, top, bottom)] to [(page, left, right, top, bottom)]
         fixed_tbls = []
-        for (img, rows), poss in tbls:
+        for idx, ((img, rows), poss) in enumerate(tbls):
+            logging.info(f"[Manual] Table {idx} before fix: img={img is not None}, rows_length={len(rows) if isinstance(rows, str) else 0}, poss={poss}")
             fixed_poss = []
             for p in poss:
                 # p is ([page_idx], left, right, top, bottom) or (page_idx, left, right, top, bottom)
                 if isinstance(p[0], list):
                     fixed_p = (p[0][0], p[1], p[2], p[3], p[4])
+                    logging.info(f"[Manual] Table {idx}: converted poss from {p} to {fixed_p}")
                 else:
                     fixed_p = p
+                    logging.info(f"[Manual] Table {idx}: poss already in correct format: {fixed_p}")
                 fixed_poss.append(fixed_p)
             fixed_tbls.append(((img, rows), fixed_poss))
+            logging.info(f"[Manual] Table {idx} after fix: fixed_poss={fixed_poss}")
         tbls = fixed_tbls
         logging.info(f"[Manual] Fixed {len(tbls)} tables poss format")
         
@@ -404,10 +414,55 @@ def chunk(filename, binary=None, from_page=0, to_page=100000, lang="Chinese", ca
             callback=callback,
             **kwargs,
         )
-        res = tokenize_table(tbls, doc, eng)
-        logging.info(f"[Manual] Tokenized {len(res)} table chunks")
-        res.extend(tokenize_chunks(chunks, doc, eng, pdf_parser))
-        logging.info(f"[Manual] Final total chunks: {len(res)} (tables + text)")
+        
+        # Tokenize tables and text chunks separately, then merge by position
+        table_chunks = tokenize_table(tbls, doc, eng)
+        text_chunks = tokenize_chunks(chunks, doc, eng, pdf_parser)
+        logging.info(f"[Manual] Tokenized {len(table_chunks)} table chunks and {len(text_chunks)} text chunks")
+        
+        # Log first few table and text chunks for debugging
+        for idx, tc in enumerate(table_chunks[:3]):
+            pos = tc.get('position_int', [])
+            content = tc.get('content_with_weight', '')[:50]
+            logging.info(f"[Manual] Table chunk {idx}: position_int={pos}, content={content}...")
+        for idx, tc in enumerate(text_chunks[:3]):
+            pos = tc.get('position_int', [])
+            content = tc.get('content_with_weight', '')[:50]
+            logging.info(f"[Manual] Text chunk {idx}: position_int={pos}, content={content}...")
+        
+        # Merge table_chunks and text_chunks by position (page, top)
+        # Each chunk has 'position_int' field with positions
+        def get_chunk_position(item):
+            """Get (page, top, original_index) position for sorting"""
+            chunk, original_idx = item
+            if 'position_int' in chunk and chunk['position_int']:
+                # position_int is a list of [page, left, right, top, bottom]
+                first_pos = chunk['position_int'][0]
+                result = (first_pos[0], first_pos[3], original_idx)  # (page, top, original_index)
+                logging.info(f"[Manual][get_chunk_position] chunk content={chunk.get('content_with_weight', '')[:30]}... -> position={result}")
+                return result
+            logging.info(f"[Manual][get_chunk_position] chunk has no position_int, returning (0, 0, {original_idx})")
+            return (0, 0, original_idx)
+        
+        # Combine all chunks with original index to preserve order when positions are equal
+        all_chunks_with_index = [(chunk, idx) for idx, chunk in enumerate(table_chunks + text_chunks)]
+        logging.info(f"[Manual] Combining {len(all_chunks_with_index)} chunks before sorting")
+        
+        # Sort by position (page, top, original_index)
+        all_chunks_with_index.sort(key=get_chunk_position)
+        
+        # Extract chunks without index
+        all_chunks = [chunk for chunk, _ in all_chunks_with_index]
+        
+        # Log sorted chunks
+        for idx, chunk in enumerate(all_chunks[:5]):
+            pos = chunk.get('position_int', [])
+            content = chunk.get('content_with_weight', '')[:50]
+            doc_type = chunk.get('doc_type_kwd', 'unknown')
+            logging.info(f"[Manual] Sorted chunk {idx}: type={doc_type}, position_int={pos}, content={content}...")
+        
+        res = all_chunks
+        logging.info(f"[Manual] Final total chunks: {len(res)} (tables + text, sorted by position)")
         table_ctx = max(0, int(parser_config.get("table_context_size", 0) or 0))
         image_ctx = max(0, int(parser_config.get("image_context_size", 0) or 0))
         if table_ctx or image_ctx:

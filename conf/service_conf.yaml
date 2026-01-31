@@ -8,7 +8,7 @@ mysql:
   name: 'rag_flow'
   user: 'root'
   password: 'infini_rag_flow'
-  host: '8.163.37.51'
+  host: '8.134.217.160'
   port: 3306
   max_connections: 900
   stale_timeout: 300
@@ -16,11 +16,11 @@ mysql:
 minio:
   user: 'rag_flow'
   password: 'infini_rag_flow'
-  host: '8.163.37.51:9000'
+  host: '8.134.217.160:9000'
   bucket: ''
   prefix_path: ''
 es:
-  hosts: 'http://8.163.37.51:1200'
+  hosts: 'http://8.134.217.160:1200'
   username: 'elastic'
   password: 'infini_rag_flow'
 os:
@@ -42,7 +42,7 @@ redis:
   db: 1
   username: ''
   password: 'infini_rag_flow'
-  host: '8.163.37.51:6379'
+  host: '8.134.217.160:6379'
 task_executor:
   message_queue_type: 'redis'
 user_default_llm:
