@@ -19,7 +19,9 @@ import os
 from typing import Any, Optional
 
 from deepdoc.parser.mineru_parser import MinerUParser
+from deepdoc.parser.mineru_online_parser import MinerUOnlineParser
 from deepdoc.parser.paddleocr_parser import PaddleOCRParser
+from common.config_utils import get_base_config
 
 
 class Base:
@@ -52,11 +54,44 @@ class MinerUOcrModel(Base, MinerUParser):
             # lower-case keys (UI), upper-case MINERU_* (env auto-provision), env vars
             return config.get(key, config.get(env_key, os.environ.get(env_key, default)))
 
-        self.mineru_api = _resolve_config("mineru_apiserver", "MINERU_APISERVER", "")
-        self.mineru_output_dir = _resolve_config("mineru_output_dir", "MINERU_OUTPUT_DIR", "")
-        self.mineru_backend = _resolve_config("mineru_backend", "MINERU_BACKEND", "pipeline")
-        self.mineru_server_url = _resolve_config("mineru_server_url", "MINERU_SERVER_URL", "")
-        self.mineru_delete_output = bool(int(_resolve_config("mineru_delete_output", "MINERU_DELETE_OUTPUT", 1)))
+        # Check if online mode is enabled from service_conf.yaml
+        mineru_service_config = get_base_config("mineru", {})
+        self.online_enabled = mineru_service_config.get("online_enabled", False)
+
+        if self.online_enabled:
+            # Online API mode configuration
+            self.online_token = mineru_service_config.get("token", "")
+            self.online_model_version = mineru_service_config.get("model_version", "vlm")
+            self.online_poll_interval = mineru_service_config.get("poll_interval", 5)
+            self.online_poll_timeout = mineru_service_config.get("poll_timeout", 300)
+            self.online_temp_dir = mineru_service_config.get("temp_dir", "")
+
+            # Override with environment variables if provided
+            self.online_token = _resolve_config("mineru_online_token", "MINERU_ONLINE_TOKEN", self.online_token)
+            self.online_model_version = _resolve_config("mineru_online_model_version", "MINERU_ONLINE_MODEL_VERSION", self.online_model_version)
+            self.online_poll_interval = int(_resolve_config("mineru_online_poll_interval", "MINERU_ONLINE_POLL_INTERVAL", str(self.online_poll_interval)))
+            self.online_poll_timeout = int(_resolve_config("mineru_online_poll_timeout", "MINERU_ONLINE_POLL_TIMEOUT", str(self.online_poll_timeout)))
+            self.online_temp_dir = _resolve_config("mineru_online_temp_dir", "MINERU_ONLINE_TEMP_DIR", self.online_temp_dir)
+
+            # Initialize online parser
+            self._online_parser = MinerUOnlineParser(
+                token=self.online_token,
+                model_version=self.online_model_version,
+                poll_interval=self.online_poll_interval,
+                poll_timeout=self.online_poll_timeout,
+                temp_dir=self.online_temp_dir,
+            )
+
+            logging.info(f"MinerU Online API mode enabled, temp_dir: {self.online_temp_dir or 'system default'}")
+        else:
+            # Local API mode configuration
+            self.mineru_api = _resolve_config("mineru_apiserver", "MINERU_APISERVER", "")
+            self.mineru_output_dir = _resolve_config("mineru_output_dir", "MINERU_OUTPUT_DIR", "")
+            self.mineru_backend = _resolve_config("mineru_backend", "MINERU_BACKEND", "pipeline")
+            self.mineru_server_url = _resolve_config("mineru_server_url", "MINERU_SERVER_URL", "")
+            self.mineru_delete_output = bool(int(_resolve_config("mineru_delete_output", "MINERU_DELETE_OUTPUT", 1)))
+
+            MinerUParser.__init__(self, mineru_api=self.mineru_api, mineru_server_url=self.mineru_server_url)
 
         # Redact sensitive config keys before logging
         redacted_config = {}
@@ -67,30 +102,46 @@ class MinerUOcrModel(Base, MinerUParser):
                 redacted_config[k] = v
         logging.info(f"Parsed MinerU config (sensitive fields redacted): {redacted_config}")
 
-        MinerUParser.__init__(self, mineru_api=self.mineru_api, mineru_server_url=self.mineru_server_url)
-
     def check_available(self, backend: Optional[str] = None, server_url: Optional[str] = None) -> tuple[bool, str]:
-        backend = backend or self.mineru_backend
-        server_url = server_url or self.mineru_server_url
-        return self.check_installation(backend=backend, server_url=server_url)
+        if self.online_enabled:
+            return self._online_parser.check_available()
+        else:
+            backend = backend or self.mineru_backend
+            server_url = server_url or self.mineru_server_url
+            return self.check_installation(backend=backend, server_url=server_url)
 
     def parse_pdf(self, filepath: str, binary=None, callback=None, parse_method: str = "raw", **kwargs):
-        ok, reason = self.check_available()
-        if not ok:
-            raise RuntimeError(f"MinerU server not accessible: {reason}")
+        if self.online_enabled:
+            # Use online parser
+            ok, reason = self._online_parser.check_available()
+            if not ok:
+                raise RuntimeError(f"MinerU Online API not accessible: {reason}")
 
-        sections, tables = MinerUParser.parse_pdf(
-            self,
-            filepath=filepath,
-            binary=binary,
-            callback=callback,
-            output_dir=self.mineru_output_dir,
-            backend=self.mineru_backend,
-            server_url=self.mineru_server_url,
-            delete_output=self.mineru_delete_output,
-            parse_method=parse_method,
-            **kwargs,
-        )
+            sections, tables = self._online_parser.parse_pdf(
+                filepath=filepath,
+                binary=binary,
+                callback=callback,
+                parse_method=parse_method,
+                **kwargs,
+            )
+        else:
+            # Use local parser
+            ok, reason = self.check_available()
+            if not ok:
+                raise RuntimeError(f"MinerU server not accessible: {reason}")
+
+            sections, tables = MinerUParser.parse_pdf(
+                self,
+                filepath=filepath,
+                binary=binary,
+                callback=callback,
+                output_dir=self.mineru_output_dir,
+                backend=self.mineru_backend,
+                server_url=self.mineru_server_url,
+                delete_output=self.mineru_delete_output,
+                parse_method=parse_method,
+                **kwargs,
+            )
         return sections, tables
 
 

@@ -211,3 +211,4 @@ backup
 # Added by cargo
 
 /target
+conf/service_conf.yaml
