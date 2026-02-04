@@ -334,5 +334,20 @@ def get_config():
                     registerEnable:
                         type: integer 0 means disabled, 1 means enabled
                         description: Whether user registration is enabled
+                    mineru:
+                        type: object
+                        properties:
+                            online_enabled:
+                                type: boolean
+                                description: Whether MinerU online API is enabled
     """
-    return get_json_result(data={"registerEnabled": settings.REGISTER_ENABLED})
+    from common.config_utils import get_base_config
+
+    mineru_config = get_base_config("mineru", {})
+
+    return get_json_result(data={
+        "registerEnabled": settings.REGISTER_ENABLED,
+        "mineru": {
+            "online_enabled": mineru_config.get("online_enabled", False),
+        }
+    })

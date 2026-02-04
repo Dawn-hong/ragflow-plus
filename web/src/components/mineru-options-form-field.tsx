@@ -1,7 +1,9 @@
 import { RAGFlowFormItem } from '@/components/ragflow-form';
+import { Badge } from '@/components/ui/badge';
 import { RAGFlowSelect } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { LLMFactory } from '@/constants/llm';
+import { useMinerUStatus } from '@/hooks/use-mineru-status';
 import { buildOptions } from '@/utils/form';
 import { useFormContext, useWatch } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
@@ -37,6 +39,7 @@ export function MinerUOptionsFormField({
 }) {
   const form = useFormContext();
   const { t } = useTranslation();
+  const { isOnlineMode, loading } = useMinerUStatus();
   const buildName = (field: string) =>
     namePrefix ? `${namePrefix}.${field}` : field;
 
@@ -56,8 +59,24 @@ export function MinerUOptionsFormField({
 
   return (
     <div className="space-y-4 border-l-2 border-primary/30 pl-4 ml-2">
-      <div className="text-sm font-medium text-text-secondary">
-        {t('knowledgeConfiguration.mineruOptions', 'MinerU Options')}
+      <div className="flex items-center gap-2">
+        <div className="text-sm font-medium text-text-secondary">
+          {t('knowledgeConfiguration.mineruOptions', 'MinerU Options')}
+        </div>
+        {!loading && (
+          <Badge
+            variant={isOnlineMode ? 'default' : 'secondary'}
+            className={
+              isOnlineMode
+                ? 'bg-green-100 text-green-800 hover:bg-green-100'
+                : 'bg-blue-100 text-blue-800 hover:bg-blue-100'
+            }
+          >
+            {isOnlineMode
+              ? t('knowledgeConfiguration.mineruOnlineMode', 'Online API')
+              : t('knowledgeConfiguration.mineruLocalMode', 'Local API')}
+          </Badge>
+        )}
       </div>
 
       <RAGFlowFormItem

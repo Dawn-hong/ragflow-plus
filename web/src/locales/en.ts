@@ -422,6 +422,8 @@ Example: A 1 KB message with 1024-dim embedding uses ~9 KB. The 5 MB default lim
         'Captures N tokens of text above and below the image & table to provide richer background context.',
       autoMetadata: 'Auto metadata',
       mineruOptions: 'MinerU options',
+      mineruOnlineMode: 'Online API',
+      mineruLocalMode: 'Local API',
       mineruParseMethod: 'Parse method',
       mineruParseMethodTip:
         'Method for parsing PDF: auto (automatic detection), txt (text extraction), ocr (optical character recognition)',

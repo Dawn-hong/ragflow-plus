@@ -389,6 +389,8 @@ export default {
         '抓取图像与表格上下方的 N 个 token，为该 chunk 提供更丰富的背景上下文。',
       autoMetadata: '自动元数据',
       mineruOptions: 'MinerU 选项',
+      mineruOnlineMode: '在线 API',
+      mineruLocalMode: '本地 API',
       mineruParseMethod: '解析方法',
       mineruParseMethodTip:
         'PDF 解析方法：auto（自动检测）、txt（文本提取）、ocr（光学字符识别）',

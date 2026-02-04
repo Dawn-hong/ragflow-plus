@@ -37,6 +37,10 @@ class MinerUOcrModel(Base, MinerUParser):
 
     def __init__(self, key: str | dict, model_name: str, **kwargs):
         Base.__init__(self, key, model_name, **kwargs)
+        # Initialize outlines attribute (required by RAGFlowPdfParser)
+        self.outlines = []
+        # Initialize logger attribute (required by MinerUParser)
+        self.logger = logging.getLogger(self.__class__.__name__)
         raw_config = {}
         if key:
             try:

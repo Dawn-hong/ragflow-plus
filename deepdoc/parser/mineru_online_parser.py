@@ -216,26 +216,41 @@ class MinerUOnlineParser(RAGFlowPdfParser):
                     )
 
                 data = result.get("data", {})
-                status = data.get("status", "")
+                # API 返回的状态在 extract_result 数组中，字段名为 state
+                extract_results = data.get("extract_result", [])
+                if not extract_results:
+                    self.logger.warning(f"[MinerU Online] No extract_result found, treating as pending")
+                    status = "pending"
+                    progress_info = {}
+                else:
+                    result_item = extract_results[0]
+                    status = result_item.get("state", "")
+                    progress_info = result_item.get("extract_progress", {})
 
                 # 计算进度（30% - 70%）
-                progress = min(0.30 + (attempt * 0.02), 0.70)
+                if progress_info and "extracted_pages" in progress_info and "total_pages" in progress_info:
+                    page_progress = progress_info["extracted_pages"] / progress_info["total_pages"]
+                    progress = 0.30 + (page_progress * 0.40)  # 30% - 70%
+                else:
+                    progress = min(0.30 + (attempt * 0.02), 0.70)
                 attempt += 1
 
-                if status == "completed":
+                if status in ["completed", "done"]:
                     self.logger.info("[MinerU Online] Parsing completed")
                     if callback:
                         callback(0.70, f"[MinerU Online] Parsing completed")
                     return data
                 elif status == "failed":
-                    error_msg = data.get("error", "Unknown error")
+                    error_msg = result_item.get("err_msg", "Unknown error")
                     raise RuntimeError(f"[MinerU Online] Parsing failed: {error_msg}")
-                elif status in ["pending", "processing"]:
+                elif status in ["pending", "running"]:
                     self.logger.debug(f"[MinerU Online] Status: {status}, elapsed: {elapsed:.1f}s")
                     if callback:
-                        callback(progress, f"[MinerU Online] Parsing {status}... ({elapsed:.0f}s)")
+                        progress_text = f"{progress_info.get('extracted_pages', 0)}/{progress_info.get('total_pages', 0)} pages" if progress_info else status
+                        callback(progress, f"[MinerU Online] Parsing {progress_text}... ({elapsed:.0f}s)")
                 else:
-                    self.logger.warning(f"[MinerU Online] Unknown status: {status}")
+                    self.logger.warning(f"[MinerU Online] Unknown status: '{status}', treating as pending")
+                    # 未知状态也视为 pending，继续轮询
 
                 time.sleep(self.poll_interval)
 
@@ -512,11 +527,14 @@ class MinerUOnlineParser(RAGFlowPdfParser):
             result_data = self._poll_result(batch_id, callback)
 
             # 7. 获取 ZIP 下载链接
-            files = result_data.get("files", [])
-            if not files:
-                raise RuntimeError("[MinerU Online] No result files returned")
+            # 从 extract_result 数组中获取文件链接
+            extract_results = result_data.get("extract_result", [])
+            if not extract_results:
+                raise RuntimeError("[MinerU Online] No extract_result returned")
 
-            zip_url = files[0].get("url")
+            result_item = extract_results[0]
+            # ZIP 下载链接在 full_zip_url 字段
+            zip_url = result_item.get("full_zip_url")
             if not zip_url:
                 raise RuntimeError("[MinerU Online] No ZIP URL in result")
 
